@@ -19,7 +19,7 @@
 | `driver/` | **VocalBridge.sys**: WaveRT kernel driver exposing one capture endpoint, "Microphone (VocalBridge Virtual Mic)". Based on Microsoft's SimpleAudioSample (MIT) |
 | `shared/VocalBridgeShared.h` | The app ↔ driver contract (IOCTLs + ring buffer layout) |
 | `tools/vbsetup/` | **vbsetup.exe**: creates the `ROOT\VocalBridge` device and installs the driver (like `devcon install`) |
-| `scripts/` | `install-driver.ps1` / `uninstall-driver.ps1` |
+| `scripts/` | `install-driver.ps1` / `uninstall-driver.ps1`; `attestation/` for getting the driver Microsoft-signed |
 | `.github/workflows/build.yml` | Windows CI: builds the app, the driver package, and a ready-to-run release zip |
 
 ## Low-latency design
@@ -79,25 +79,62 @@ The build is **test-signed** with an auto-generated certificate.
 
 Or just take the `VocalBridge-win64` artifact from the GitHub Actions run, which contains everything below.
 
-## Installing
+## Installing (keep Secure Boot on)
+
+Windows only loads kernel drivers with Secure Boot on if **Microsoft** has signed them; test mode is the only way around that, and Secure Boot locks test mode. So VocalBridge offers two Secure Boot-friendly routes, and the app's **Auto** virtual-mic mode (the default) uses whichever is available:
+
+| Route | What you install | Secure Boot | Anti-cheat | Extra latency |
+|---|---|---|---|---|
+| **A. Signed virtual cable** (works today) | [VB-CABLE](https://vb-audio.com/Cable/) (free/donationware, Microsoft-signed) | ✅ stays on | ✅ | ~ app buffer + safety + the cable's internal buffer |
+| **B. VocalBridge driver, attestation-signed** | `install-driver.ps1` with a Microsoft-signed package | ✅ stays on | ✅ | lowest (~ app buffer + safety, shared ring) |
+| C. VocalBridge driver, test-signed (CI default) | `install-driver.ps1` + test mode | ❌ must be off | ❌ many refuse | lowest |
+
+### Route A: signed virtual cable, no driver of ours
+
+1. Install VB-CABLE from vb-audio.com and reboot if it asks.
+2. Start VocalBridge. **Auto** detects `CABLE Input (VB-Audio Virtual Cable)` and opens it in **WASAPI exclusive mode** with a small buffer, falling back to low-latency or shared mode if that fails. Drift compensation keeps the hand-off at a few ms.
+3. In your game, Discord or OBS, select **CABLE Output (VB-Audio Virtual Cable)** as the microphone. The app shows the exact name to pick.
+4. For the lowest latency, lower the cable's internal buffer in VB-Audio's CABLE control panel (*Max Latency*) to the smallest value that stays clean.
+
+VB-Audio's A+B, C+D and Hi-Fi cables are recognised too. Any other output device can be chosen manually from the dropdown.
+
+### Route B: get the VocalBridge driver Microsoft-signed (attestation signing)
+
+This is the proper fix for distributing the driver. It's a one-time setup.
+
+1. **Buy an EV code-signing certificate** (DigiCert, Sectigo, GlobalSign, SSL.com, ...). EV certificates are issued to a **registered business**, not individuals, and are delivered on a hardware token or a cloud HSM.
+2. **Register a Partner Center hardware account** (free) using that EV certificate.
+3. **Sign and submit**, either by hand or from CI.
+
+**By hand:**
+
+```powershell
+msbuild driver\VocalBridgeDriver.sln /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off
+scripts\attestation\make-attestation-cab.ps1 -DriverDir driver\Source\Main\x64\Release -CertThumbprint <your EV cert thumbprint>
+```
+
+Then upload `VocalBridge.cab` in Partner Center → *Hardware* → *Submit new hardware*: pick the Windows 10/11 x64 signatures and download the signed package. Alternatively, automate the upload with `scripts\attestation\submit-attestation.ps1`, which uses Microsoft's [SDCM](https://github.com/microsoft/SDCM).
+
+**From CI:**
+1. Set the repository variable `ATTESTATION_ENABLED=true`.
+2. Add these secrets:
+   - an EV certificate in Azure Key Vault (Premium/HSM): `EV_KEYVAULT_URL`, `EV_KEYVAULT_CERT_NAME`, `EV_KEYVAULT_TENANT_ID`, `EV_KEYVAULT_CLIENT_ID`, `EV_KEYVAULT_CLIENT_SECRET`
+   - an Entra ID app [associated with your Partner Center account](https://learn.microsoft.com/windows-hardware/drivers/dashboard/dashboard-api): `PARTNER_CENTER_TENANT_ID`, `PARTNER_CENTER_CLIENT_ID`, `PARTNER_CENTER_CLIENT_SECRET`
+
+The `driver-attested` job then builds the driver unsigned, packs and EV-signs the CAB, submits it, waits for Microsoft, and puts the signed driver into the `VocalBridge-win64` release zip.
+
+The attestation script requests the Windows 11 x64 signature (`WINDOWS_v100_X64_CO_FULL`) by default. Confirm the current codes in Partner Center. The INF currently targets Windows 11 (build 22000+).
+
+### Installing the driver (routes B and C)
 
 1. Unzip the `VocalBridge-win64` artifact.
 2. Right-click `install-driver.ps1` and choose **Run with PowerShell**. It elevates itself, then:
-   - offers to enable **test signing** (`bcdedit /set testsigning on`, requires a reboot, and **Secure Boot must be off**),
-   - trusts the test certificate,
-   - creates the virtual mic device.
-3. Check that **Settings → Sound → Input** now lists **Microphone (VocalBridge Virtual Mic)**.
-4. Run `vbsetup.exe status` at any time to check the driver and the app link.
+   - **Microsoft-signed package:** installs directly. Secure Boot stays on.
+   - **Test-signed package with Secure Boot on:** stops and points you to route A or B. It doesn't try to change boot settings.
+   - **Test-signed package with Secure Boot off:** offers to enable test mode (`bcdedit /set testsigning on`, then reboot) and trusts the test certificate.
+3. Check that **Settings → Sound → Input** now lists **Microphone (VocalBridge Virtual Mic)**. `vbsetup.exe status` shows the device and app-link state.
 
 To remove it, run `uninstall-driver.ps1`.
-
-### ⚠️ About driver signing and games
-
-Windows only loads kernel drivers that are signed:
-
-- **Test-signed build (what CI produces).** Fine for development and personal use. However, test-signing mode needs Secure Boot off, shows a "Test Mode" watermark, and **many anti-cheat systems (Vanguard, FACEIT, ESEA, some EAC/BattlEye titles) refuse to run while it is on.**
-- **Public release.** Sign the driver with an EV code-signing certificate and submit it to Microsoft's **attestation signing** (Partner Center → Hardware dashboard). Attestation-signed drivers install on any Windows 10/11 PC with Secure Boot on and no test mode.
-- **No driver at all.** The app also has a **fallback output mode**. In the *Virtual Mic Output* dropdown, pick any output device, e.g. a signed third-party virtual cable such as *CABLE Input (VB-Audio Virtual Cable)*, and select its matching recording device in your game. This uses the same drift-compensated low-latency feed, plus that device's own buffer.
 
 ## Using the app
 
@@ -112,10 +149,10 @@ Windows only loads kernel drivers that are signed:
    - Each row has an enable/bypass toggle, **Edit**, reorder (▲▼) and remove (✕).
    - Each plugin's latency is shown in its row.
 5. **Monitoring.** Toggle it and set the level. The latency line shows the real round-trip.
-6. **Virtual Mic Output.** Leave it on *VocalBridge Virtual Mic*.
-   - The status dot turns **green** when an app is recording from it, and **yellow** when the driver is connected but idle.
+6. **Virtual Mic Output.** Leave it on **Auto**. It uses the VocalBridge driver if installed, otherwise a signed virtual cable (see *Installing*), and re-checks every few seconds.
+   - The status dot turns **green** while streaming, **yellow** when connected but idle, and **red** when nothing is available. The line below always names the exact input to select in your game.
    - Use **Mute** to silence only what the game hears; you can still monitor yourself.
-7. Select **Microphone (VocalBridge Virtual Mic)** as the input device in your game or app.
+7. Select the input the app names as the microphone in your game or app: **Microphone (VocalBridge Virtual Mic)** or **CABLE Output (VB-Audio Virtual Cable)**.
 8. **Save Preset… / Load Preset…** stores the whole chain with every plugin's settings. The current chain, devices and settings are also restored automatically on the next launch.
 
 ## Project layout
@@ -138,6 +175,7 @@ driver/
 shared/VocalBridgeShared.h   app ↔ driver contract
 tools/vbsetup/               device installer
 scripts/                     install / uninstall scripts
+scripts/attestation/         CAB packing + Partner Center submission for Microsoft signing
 ```
 
 ## Licensing notes

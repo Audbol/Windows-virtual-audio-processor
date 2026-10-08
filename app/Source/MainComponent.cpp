@@ -11,6 +11,7 @@ namespace
     const juce::Colour kText        { 0xffe6e9ef };
     const juce::Colour kDimText     { 0xff8b94a3 };
 
+    constexpr const char* kAutoTargetId = "auto";
     constexpr const char* kDriverTargetId = "driver";
     constexpr const char* kOffTargetId = "off";
 
@@ -466,6 +467,16 @@ void MainComponent::timerCallback()
         statusCountdown = 10;
         updateStatus();
     }
+
+    // Auto mode: if nothing usable was found (or the driver went away), look again
+    // every few seconds so installing VB-CABLE / the driver is picked up live.
+    if (currentVmTarget == kAutoTargetId && --autoRetryCountdown <= 0)
+    {
+        autoRetryCountdown = 30 * 5;
+        auto& vm = engine.getVirtualMic();
+        if (! vm.hasBackend() || vm.getStatus().state == VirtualMicBackend::State::unavailable)
+            applyVirtualMicTarget (kAutoTargetId, true);
+    }
 }
 
 void MainComponent::updateStatus()
@@ -496,24 +507,40 @@ void MainComponent::updateStatus()
 
     auto& vm = engine.getVirtualMic();
     const auto status = vm.getStatus();
-    vmStatusLabel.setText (status.text, juce::dontSendNotification);
+    const bool autoFoundNothing = currentVmTarget == kAutoTargetId && ! vm.hasBackend();
+
+    vmStatusLabel.setText (autoFoundNothing ? juce::String ("No virtual mic found - see below")
+                                            : status.text,
+                           juce::dontSendNotification);
 
     using State = VirtualMicBackend::State;
-    vmStatusColour = ! vm.hasBackend()                ? juce::Colours::grey
+    vmStatusColour = autoFoundNothing                 ? juce::Colour (0xffe74c3c)
+                   : ! vm.hasBackend()                ? juce::Colours::grey
                    : status.state == State::streaming ? juce::Colour (0xff2ecc71)
                    : status.state == State::idle      ? juce::Colour (0xfff1c40f)
                                                       : juce::Colour (0xffe74c3c);
 
-    if (vm.hasBackend() && status.state == State::streaming)
+    const juce::String pickHint = status.recordFrom.isNotEmpty()
+                                    ? "In games / Discord / OBS select \"" + status.recordFrom + "\" as the microphone"
+                                    : juce::String();
+
+    if (autoFoundNothing)
     {
-        vmStatsLabel.setText ("Added latency into virtual mic ~" + juce::String (vm.getEstimatedLatencyMs(), 1) + " ms"
+        vmStatsLabel.setText ("Install the VocalBridge driver, or a Microsoft-signed virtual cable such as VB-CABLE "
+                              "(vb-audio.com/Cable - works with Secure Boot on). It will be picked up automatically.",
+                              juce::dontSendNotification);
+    }
+    else if (vm.hasBackend() && status.state == State::streaming)
+    {
+        vmStatsLabel.setText ((pickHint.isNotEmpty() ? pickHint + "   |   " : juce::String())
+                              + "added ~" + juce::String (vm.getEstimatedLatencyMs(), 1) + " ms"
                               + "   |   underruns: " + juce::String (status.underruns)
                               + "   |   resyncs: " + juce::String (status.resyncs),
                               juce::dontSendNotification);
     }
     else if (vm.hasBackend() && status.state == State::idle)
     {
-        vmStatsLabel.setText ("Ready - select \"VocalBridge Virtual Mic\" as the microphone in your game or app.",
+        vmStatsLabel.setText ("Ready - " + (pickHint.isNotEmpty() ? pickHint : juce::String ("select the virtual mic in your game or app")) + ".",
                               juce::dontSendNotification);
     }
     else
@@ -715,6 +742,7 @@ void MainComponent::rebuildVirtualMicTargets()
         vmTargetBox.addItem (label, vmTargetIds.size());
     };
 
+    add (kAutoTargetId, "Auto (recommended): VocalBridge driver, else a signed virtual cable");
     add (kOffTargetId, "Off");
 #if JUCE_WINDOWS
     add (kDriverTargetId, "VocalBridge Virtual Mic (driver, lowest latency)");
@@ -734,13 +762,36 @@ void MainComponent::rebuildVirtualMicTargets()
     }
 }
 
-void MainComponent::applyVirtualMicTarget (const juce::String& id)
+std::unique_ptr<VirtualMicBackend> MainComponent::createAutoBackend()
 {
-    if (id == currentVmTarget && engine.getVirtualMic().hasBackend() == (id != kOffTargetId))
+#if JUCE_WINDOWS
+    // 1. Our own driver: lowest latency (shared ring, no extra audio stream).
+    if (DriverBackend::isDriverPresent())
+        return std::make_unique<DriverBackend>();
+#endif
+
+    // 2. A Microsoft-signed third-party virtual cable: loads with Secure Boot on and
+    //    no test mode, so it also works on anti-cheat-protected games.
+    if (auto cable = DeviceBackend::openBestVirtualCable (engine.getDeviceManager()))
+        return cable;
+
+    return nullptr;
+}
+
+void MainComponent::applyVirtualMicTarget (const juce::String& id, bool force)
+{
+    if (! force && id == currentVmTarget && engine.getVirtualMic().hasBackend() == (id != kOffTargetId))
         return;
 
     currentVmTarget = id;
     std::unique_ptr<VirtualMicBackend> backend;
+
+    if (id == kAutoTargetId)
+    {
+        // Release the current device first so the cable can be reopened in exclusive mode.
+        engine.getVirtualMic().setBackend (nullptr);
+        backend = createAutoBackend();
+    }
 
 #if JUCE_WINDOWS
     if (id == kDriverTargetId)
@@ -794,11 +845,7 @@ void MainComponent::restoreState()
     emptyChainHint.setVisible (engine.getChain().size() == 0);
 
     rebuildVirtualMicTargets();
-#if JUCE_WINDOWS
-    const juce::String defaultTarget = kDriverTargetId;
-#else
-    const juce::String defaultTarget = kOffTargetId;
-#endif
+    const juce::String defaultTarget = kAutoTargetId;
     auto target = s->getValue ("vmTarget", defaultTarget);
     if (! vmTargetIds.contains (target))
         target = defaultTarget;

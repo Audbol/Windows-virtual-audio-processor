@@ -89,7 +89,8 @@ private:
     void loadPreset();
 
     void rebuildVirtualMicTargets();
-    void applyVirtualMicTarget (const juce::String& id);
+    void applyVirtualMicTarget (const juce::String& id, bool force = false);
+    std::unique_ptr<VirtualMicBackend> createAutoBackend();
 
     void closeEditorFor (juce::AudioProcessor*);
     void closeAllEditors();
@@ -137,6 +138,7 @@ private:
     std::map<juce::AudioProcessor*, std::unique_ptr<PluginWindow>> editors;
     std::unique_ptr<juce::FileChooser> fileChooser;
     int statusCountdown = 0;
+    int autoRetryCountdown = 30 * 5;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

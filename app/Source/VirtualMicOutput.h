@@ -26,6 +26,7 @@ public:
         int underruns = 0;
         int resyncs = 0;
         double bufferedMs = 0.0;
+        juce::String recordFrom;    // the input other apps should select, e.g. "CABLE Output (VB-Audio Virtual Cable)"
     };
 
     virtual ~VirtualMicBackend() = default;
@@ -63,6 +64,9 @@ public:
     DriverBackend();
     ~DriverBackend() override;
 
+    /** True if the VocalBridge driver is installed and running (\\.\VocalBridge opens). */
+    static bool isDriverPresent();
+
     double getSampleRate() const override;
     int getConsumerBlockFrames() const override;
     bool isConsuming() const override;
@@ -91,6 +95,18 @@ public:
     DeviceBackend (juce::AudioDeviceManager& manager, const juce::String& typeName, const juce::String& deviceName);
     ~DeviceBackend() override;
 
+    bool isOpen() const                    { return device != nullptr; }
+
+    /** Name of the recording endpoint paired with a known virtual-cable playback endpoint
+        ("CABLE Input (VB-Audio Virtual Cable)" -> "CABLE Output (VB-Audio Virtual Cable)"),
+        or empty if 'outputName' isn't a recognised cable. */
+    static juce::String pairedRecordingName (const juce::String& outputName);
+
+    /** Finds an installed, Microsoft-signed virtual cable (VB-Audio CABLE / Hi-Fi Cable /
+        CABLE-A..D) and opens it with the lowest-latency Windows mode that works
+        (exclusive > low-latency shared > shared). Returns nullptr if none is usable. */
+    static std::unique_ptr<DeviceBackend> openBestVirtualCable (juce::AudioDeviceManager& manager);
+
     double getSampleRate() const override;
     int getConsumerBlockFrames() const override;
     bool isConsuming() const override;
@@ -108,7 +124,7 @@ private:
     static constexpr int kFifoFrames = 32768;
 
     std::unique_ptr<juce::AudioIODevice> device;
-    juce::String openError, deviceLabel;
+    juce::String openError, deviceLabel, typeLabel;
     double sampleRate = 48000.0;
     int blockFrames = 512;
 

@@ -180,6 +180,17 @@ private:
 };
 
 //==============================================================================
+bool DriverBackend::isDriverPresent()
+{
+    HANDLE h = CreateFileW (VOCALBRIDGE_USER_DEVICE_PATH, GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+    CloseHandle (h);
+    return true;
+}
+
 DriverBackend::DriverBackend()
     : ring (std::make_unique<Ring>())
 {
@@ -254,6 +265,8 @@ VirtualMicBackend::Status DriverBackend::getStatus() const
         s.text = "Streaming to VocalBridge Virtual Mic";
     }
 
+    s.recordFrom = "Microphone (VocalBridge Virtual Mic)";
+
     if (ring->header != nullptr)
     {
         s.underruns = (int) Ring::ref (ring->header->UnderrunCount).load (std::memory_order_relaxed);
@@ -267,8 +280,60 @@ VirtualMicBackend::Status DriverBackend::getStatus() const
 //==============================================================================
 // DeviceBackend
 //==============================================================================
+juce::String DeviceBackend::pairedRecordingName (const juce::String& outputName)
+{
+    // VB-Audio names its playback side "... Input" and its recording side "... Output":
+    //   CABLE Input (VB-Audio Virtual Cable)      -> CABLE Output (VB-Audio Virtual Cable)
+    //   CABLE-A Input (VB-Audio Cable A)          -> CABLE-A Output (VB-Audio Cable A)
+    //   Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)  -> Hi-Fi Cable Output (VB-Audio Hi-Fi Cable)
+    const auto lower = outputName.toLowerCase();
+    if (lower.contains ("cable") && lower.contains (" input"))
+        return outputName.replaceFirstOccurrenceOf (" Input", " Output");
+
+    return {};
+}
+
+std::unique_ptr<DeviceBackend> DeviceBackend::openBestVirtualCable (juce::AudioDeviceManager& manager)
+{
+    // Lowest latency first. Exclusive mode skips the Windows mixer's own buffer on the
+    // playback side; we are the only thing that should ever play into the cable.
+    const char* typeOrder[] = { "Windows Audio (Exclusive Mode)", "Windows Audio (Low Latency Mode)", "Windows Audio" };
+
+    for (auto* typeName : typeOrder)
+    {
+        juce::AudioIODeviceType* type = nullptr;
+        for (auto* t : manager.getAvailableDeviceTypes())
+            if (t->getTypeName() == typeName)
+                type = t;
+
+        if (type == nullptr)
+            continue;
+
+        type->scanForDevices();
+
+        // Prefer the plain "CABLE Input" (the free VB-CABLE) over the A/B/C/D or Hi-Fi variants.
+        auto names = type->getDeviceNames (false);
+        std::stable_sort (names.begin(), names.end(), [] (const juce::String& a, const juce::String& b)
+        {
+            return a.startsWithIgnoreCase ("CABLE Input") && ! b.startsWithIgnoreCase ("CABLE Input");
+        });
+
+        for (auto& name : names)
+        {
+            if (pairedRecordingName (name).isEmpty())
+                continue;
+
+            auto backend = std::make_unique<DeviceBackend> (manager, typeName, name);
+            if (backend->isOpen())
+                return backend;
+        }
+    }
+
+    return nullptr;
+}
+
 DeviceBackend::DeviceBackend (juce::AudioDeviceManager& manager, const juce::String& typeName, const juce::String& deviceName)
-    : deviceLabel (deviceName)
+    : deviceLabel (deviceName), typeLabel (typeName)
 {
     fifoData.clear();
 
@@ -435,7 +500,10 @@ VirtualMicBackend::Status DeviceBackend::getStatus() const
     }
 
     s.state = isConsuming() ? State::streaming : State::idle;
-    s.text = "Playing into \"" + deviceLabel + "\" @ " + juce::String (sampleRate / 1000.0, 1) + " kHz";
+    s.text = "Playing into \"" + deviceLabel + "\" @ " + juce::String (sampleRate / 1000.0, 1) + " kHz, "
+           + juce::String (blockFrames) + " samples"
+           + (typeLabel.contains ("Exclusive") ? " (exclusive)" : "");
+    s.recordFrom = pairedRecordingName (deviceLabel);
     s.underruns = underruns.load();
     s.resyncs = resyncs.load();
     s.bufferedMs = (double) fifo.getNumReady() * 1000.0 / sampleRate;

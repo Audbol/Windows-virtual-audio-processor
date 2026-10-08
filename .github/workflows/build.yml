@@ -52,27 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 64-bit MSBuild: the NuGet WDK ships ApiValidator / InfVerif for the x64 host only.
-      - uses: microsoft/setup-msbuild@v2
-        with:
-          msbuild-architecture: x64
-
-      - name: Restore WDK (NuGet)
-        working-directory: driver
-        run: nuget restore packages.config -PackagesDirectory packages
-
-      # The NuGet WDK/SDK packages carry stampinf / inf2cat / signtool, but VS 2022's
-      # driver targets look for them on PATH.
-      - name: Put WDK tools on PATH
-        shell: pwsh
-        run: |
-          foreach ($tool in "stampinf.exe", "inf2cat.exe", "signtool.exe", "infverif.exe") {
-            $hit = Get-ChildItem driver/packages -Recurse -Filter $tool -ErrorAction SilentlyContinue |
-                   Where-Object { $_.FullName -match '\\(x64|x86)\\' } |
-                   Sort-Object { $_.FullName -notmatch '\\x64\\' } | Select-Object -First 1
-            if ($hit) { Write-Host "$tool -> $($hit.DirectoryName)"; $hit.DirectoryName | Out-File $env:GITHUB_PATH -Append }
-            else { Write-Host "$tool not found in packages" }
-          }
+      - uses: ./.github/actions/setup-wdk
 
       - name: Build driver package
         working-directory: driver
@@ -95,9 +75,69 @@ jobs:
           name: driver-x64
           path: out/
 
+  # Microsoft attestation signing: produces a driver that installs with Secure Boot ON
+  # and no test mode. Opt-in: set repository variable ATTESTATION_ENABLED=true and the
+  # secrets below (see README > "Driver signing without disabling Secure Boot").
+  driver-attested:
+    name: Driver (Microsoft attestation-signed)
+    if: ${{ vars.ATTESTATION_ENABLED == 'true' }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-wdk
+
+      - name: Build driver (unsigned - Microsoft adds the signature)
+        working-directory: driver
+        run: msbuild VocalBridgeDriver.sln /m /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off
+
+      - name: Pack CAB
+        shell: pwsh
+        run: ./scripts/attestation/make-attestation-cab.ps1 -DriverDir driver/Source/Main/x64/Release -OutDir attest
+
+      # EV certificates live in an HSM. This uses one stored in Azure Key Vault
+      # (Premium / HSM-backed); swap in your CA's cloud signing tool if you use another.
+      - name: EV-sign CAB (Azure Key Vault)
+        shell: pwsh
+        env:
+          KV_URL: ${{ secrets.EV_KEYVAULT_URL }}
+          KV_CERT: ${{ secrets.EV_KEYVAULT_CERT_NAME }}
+          KV_TENANT: ${{ secrets.EV_KEYVAULT_TENANT_ID }}
+          KV_CLIENT: ${{ secrets.EV_KEYVAULT_CLIENT_ID }}
+          KV_SECRET: ${{ secrets.EV_KEYVAULT_CLIENT_SECRET }}
+        run: |
+          dotnet tool install --global AzureSignTool
+          AzureSignTool sign -kvu $env:KV_URL -kvc $env:KV_CERT -kvt $env:KV_TENANT -kvi $env:KV_CLIENT -kvs $env:KV_SECRET `
+            -tr http://timestamp.digicert.com -td sha256 -fd sha256 -v attest/VocalBridge.cab
+          if ($LASTEXITCODE -ne 0) { throw "AzureSignTool failed" }
+
+      - name: Build SDCM (Partner Center submission tool)
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/SDCM.git sdcm
+          git -C sdcm checkout c5ab7e663ba727e866bb2d979d81906a4ded9a73
+          msbuild sdcm/SurfaceDevCenterManager.sln /restore /m /p:Configuration=Release
+
+      - name: Submit for attestation signing and download
+        shell: pwsh
+        env:
+          SDCM_CREDS_TENANTID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+          SDCM_CREDS_CLIENTID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+          SDCM_CREDS_KEY: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+        run: |
+          ./scripts/attestation/submit-attestation.ps1 -Sdcm sdcm/SurfaceDevCenterManager/bin/Release/sdcm.exe `
+            -CabPath attest/VocalBridge.cab -OutDir attested
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver-x64-attested
+          path: attested/
+
   package:
     name: Release zip
-    needs: [app, driver]
+    needs: [app, driver, driver-attested]
+    # Runs even when the opt-in attestation job was skipped.
+    if: ${{ always() && needs.app.result == 'success' && needs.driver.result == 'success' }}
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -112,9 +152,21 @@ jobs:
           name: driver-x64
           path: VocalBridge/driver
 
+      # Prefer the Microsoft-signed driver when the attestation job ran.
+      - uses: actions/download-artifact@v4
+        if: ${{ needs.driver-attested.result == 'success' }}
+        with:
+          name: driver-x64-attested
+          path: attested
+
       - name: Assemble
         shell: pwsh
         run: |
+          if (Test-Path attested/VocalBridge.inf) {
+            Remove-Item VocalBridge/driver -Recurse -Force
+            Copy-Item attested VocalBridge/driver -Recurse
+            Write-Host "Using the attestation-signed driver"
+          }
           Copy-Item scripts/*.ps1 VocalBridge/
           Copy-Item README.md VocalBridge/
 

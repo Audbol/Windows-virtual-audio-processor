@@ -1,0 +1,27 @@
+name: Set up WDK (NuGet)
+description: Restores the pinned WDK/SDK NuGet packages and puts their tools on PATH.
+runs:
+  using: composite
+  steps:
+    # 64-bit MSBuild: the NuGet WDK ships ApiValidator / InfVerif for the x64 host only.
+    - uses: microsoft/setup-msbuild@v2
+      with:
+        msbuild-architecture: x64
+
+    - name: Restore WDK (NuGet)
+      shell: pwsh
+      working-directory: driver
+      run: nuget restore packages.config -PackagesDirectory packages
+
+    # The NuGet WDK/SDK packages carry stampinf / inf2cat / signtool, but VS 2022's
+    # driver targets look for them on PATH.
+    - name: Put WDK tools on PATH
+      shell: pwsh
+      run: |
+        foreach ($tool in "stampinf.exe", "inf2cat.exe", "signtool.exe", "infverif.exe") {
+          $hit = Get-ChildItem driver/packages -Recurse -Filter $tool -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match '\\(x64|x86)\\' } |
+                 Sort-Object { $_.FullName -notmatch '\\x64\\' } | Select-Object -First 1
+          if ($hit) { Write-Host "$tool -> $($hit.DirectoryName)"; $hit.DirectoryName | Out-File $env:GITHUB_PATH -Append }
+          else { Write-Host "$tool not found in packages" }
+        }
