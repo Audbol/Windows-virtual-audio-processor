@@ -1,0 +1,22 @@
+# CMake / app
+/build*/
+/out/
+CMakeUserPresets.json
+
+# Visual Studio / WDK
+.vs/
+*.user
+*.aps
+driver/packages/
+driver/**/x64/
+driver/**/ARM64/
+driver/**/Debug/
+driver/**/Release/
+*.obj
+*.pdb
+*.tlog
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

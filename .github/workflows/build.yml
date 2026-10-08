@@ -1,0 +1,108 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  app:
+    name: App (VocalBridge.exe + vbsetup.exe)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # Optional ASIO support. Set the repository variable ENABLE_ASIO=true to
+      # download Steinberg's ASIO SDK (by doing so you accept its license).
+      - name: Fetch ASIO SDK (optional)
+        if: ${{ vars.ENABLE_ASIO == 'true' }}
+        shell: pwsh
+        run: |
+          $url = "${{ vars.ASIO_SDK_URL }}"
+          if (-not $url) { $url = "https://www.steinberg.net/asiosdk" }
+          Invoke-WebRequest -Uri $url -OutFile asiosdk.zip
+          Expand-Archive asiosdk.zip -DestinationPath asiosdk
+          $dir = (Get-ChildItem asiosdk -Recurse -Filter iasiodrv.h | Select-Object -First 1).Directory.Parent.FullName
+          "ASIO_ARGS=-DVOCALBRIDGE_ASIO_SDK_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ${{ env.ASIO_ARGS }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          Copy-Item build/app/VocalBridge_artefacts/Release/VocalBridge.exe out/
+          Copy-Item build/tools/vbsetup/Release/vbsetup.exe out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-x64
+          path: out/
+
+  driver:
+    name: Driver (VocalBridge.sys, test-signed)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Restore WDK (NuGet)
+        working-directory: driver
+        run: nuget restore packages.config -PackagesDirectory packages
+
+      - name: Build driver package
+        working-directory: driver
+        run: msbuild VocalBridgeDriver.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          $pkg = Get-ChildItem driver -Recurse -Directory -Filter package |
+                 Where-Object { Test-Path (Join-Path $_.FullName "VocalBridge.inf") } | Select-Object -First 1
+          if (-not $pkg) { throw "driver package folder not found" }
+          Copy-Item "$($pkg.FullName)\*" out/
+          $cer = Get-ChildItem $pkg.Parent.FullName -Filter *.cer | Select-Object -First 1
+          if ($cer) { Copy-Item $cer.FullName out/VocalBridgeTestCert.cer }
+          Get-ChildItem out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver-x64
+          path: out/
+
+  package:
+    name: Release zip
+    needs: [app, driver]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-x64
+          path: VocalBridge
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: driver-x64
+          path: VocalBridge/driver
+
+      - name: Assemble
+        shell: pwsh
+        run: |
+          Copy-Item scripts/*.ps1 VocalBridge/
+          Copy-Item README.md VocalBridge/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VocalBridge-win64
+          path: VocalBridge/

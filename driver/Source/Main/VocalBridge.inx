@@ -1,0 +1,147 @@
+;
+; VocalBridge.inf - VocalBridge Virtual Microphone
+;
+; Exposes one capture endpoint, "Microphone (VocalBridge Virtual Mic)", that
+; games / chat / streaming apps can select as their input. The VocalBridge host
+; application feeds it with your processed voice through \\.\VocalBridge.
+;
+; Based on the Microsoft SimpleAudioSample (Windows-driver-samples, MIT license).
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = MEDIA
+Provider    = %ProviderName%
+ClassGUID   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+DriverVer   = 10/08/2026, 0.1.0.0
+CatalogFile = VocalBridge.cat
+PnpLockDown = 1
+
+[SourceDisksNames]
+222="VocalBridge Driver Disk","",222
+
+[SourceDisksFiles]
+VocalBridge.sys=222
+
+[SignatureAttributes]
+VocalBridge.sys=SignatureAttributes.DRM
+
+[SignatureAttributes.DRM]
+DRMLevel=1300
+
+[SignatureAttributes.PETrust]
+PETrust=true
+
+[Manufacturer]
+%MfgName%=VOCALBRIDGE,NT$ARCH$.10.0...22000
+
+[VOCALBRIDGE.NT$ARCH$.10.0...22000]
+%VOCALBRIDGE_SA.DeviceDesc%=VOCALBRIDGE_SA, ROOT\VocalBridge
+
+[DestinationDirs]
+VOCALBRIDGE_SA.CopyList=13 ; 13=Package's DriverStore directory
+
+[VOCALBRIDGE_SA.CopyList]
+VocalBridge.sys
+
+[VOCALBRIDGE_SA.AddReg]
+HKR,,AssociatedFilters,,"wdmaud,swmidi,redbook"
+HKR,,Driver,,VocalBridge.sys
+
+HKR,PowerSettings,SingleComponentMultiFxStates,3,1,0,0,0  ; Turn on multi Fx support.
+HKR,PowerSettings,ConservationIdleTime,3,3,0,0,0          ; 3 seconds for idle power management when on battery
+HKR,PowerSettings,PerformanceIdleTime,3,3,0,0,0           ; 3 seconds for idle power management when on AC power
+HKR,PowerSettings,IdlePowerState,3,3,0,0,0                ; go to D3 for idle power management
+
+HKR,Drivers,SubClasses,,"wave,midi,mixer"
+
+HKR,Drivers\wave\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\midi\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\mixer\wdmaud.drv,Driver,,wdmaud.drv
+
+HKR,Drivers\wave\wdmaud.drv,Description,,%VOCALBRIDGE_SA.DeviceDesc%
+HKR,Drivers\mixer\wdmaud.drv,Description,,%VOCALBRIDGE_SA.DeviceDesc%
+
+;======================================================
+; capture interfaces: virtual microphone
+;======================================================
+[VOCALBRIDGE.I.WaveMicArray1]
+AddReg=VOCALBRIDGE.I.WaveMicArray1.AddReg
+
+[VOCALBRIDGE.I.WaveMicArray1.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%VOCALBRIDGE.WaveMicArray1.szPname%
+
+[VOCALBRIDGE.I.TopologyMicArray1]
+AddReg=VOCALBRIDGE.I.TopologyMicArray1.AddReg
+
+[VOCALBRIDGE.I.TopologyMicArray1.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%VOCALBRIDGE.TopologyMicArray1.szPname%
+
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,0x1
+
+;======================================================
+; VOCALBRIDGE_SA
+;======================================================
+[VOCALBRIDGE_SA.NT]
+Include=ks.inf,wdmaudio.inf
+Needs=KS.Registration, WDMAUDIO.Registration
+CopyFiles=VOCALBRIDGE_SA.CopyList
+AddReg=VOCALBRIDGE_SA.AddReg
+
+[VOCALBRIDGE_SA.NT.Interfaces]
+AddInterface=%KSCATEGORY_AUDIO%,    %KSNAME_WaveMicArray1%, VOCALBRIDGE.I.WaveMicArray1
+AddInterface=%KSCATEGORY_REALTIME%, %KSNAME_WaveMicArray1%, VOCALBRIDGE.I.WaveMicArray1
+AddInterface=%KSCATEGORY_CAPTURE%,  %KSNAME_WaveMicArray1%, VOCALBRIDGE.I.WaveMicArray1
+AddInterface=%KSCATEGORY_AUDIO%,    %KSNAME_TopologyMicArray1%, VOCALBRIDGE.I.TopologyMicArray1
+AddInterface=%KSCATEGORY_TOPOLOGY%, %KSNAME_TopologyMicArray1%, VOCALBRIDGE.I.TopologyMicArray1
+
+[VOCALBRIDGE_SA.NT.Services]
+AddService=VocalBridge,0x00000002,VocalBridge_Service_Inst
+
+[VocalBridge_Service_Inst]
+DisplayName=%VocalBridge.SvcDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\VocalBridge.sys
+
+[VOCALBRIDGE_SA.NT.HW]
+AddReg = AUDIOHW.AddReg
+
+[AUDIOHW.AddReg]
+; FILE_DEVICE_SOUND
+HKR,,DeviceType,0x10001,0x0000001D
+; SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_RWX_RES_RWX
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGWGX;;;RC)"
+
+[VOCALBRIDGE_SA.NT.Wdf]
+KmdfService = VocalBridge, VOCALBRIDGE_SA_WdfSect
+
+[VOCALBRIDGE_SA_WdfSect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+KSNAME_WaveMicArray1="WaveMicArray1"
+KSNAME_TopologyMicArray1="TopologyMicArray1"
+
+Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME ="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+KSCATEGORY_TOPOLOGY = "{DDA54A40-1E4C-11D1-A050-405705C10000}"
+
+KSNODETYPE_ANY   = "{00000000-0000-0000-0000-000000000000}"
+
+PKEY_AudioEndpoint_Association               = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
+PKEY_AudioEndpoint_Supports_EventDriven_Mode = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},7"
+
+ProviderName = "VocalBridge"
+MfgName      = "VocalBridge"
+VOCALBRIDGE_SA.DeviceDesc="VocalBridge Virtual Mic"
+VocalBridge.SvcDesc="VocalBridge Virtual Mic Driver"
+
+VOCALBRIDGE.WaveMicArray1.szPname="VocalBridge Virtual Mic Wave"
+VOCALBRIDGE.TopologyMicArray1.szPname="VocalBridge Virtual Mic Topology"

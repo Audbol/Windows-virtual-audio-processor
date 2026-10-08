@@ -1,0 +1,7 @@
+add_executable(vbsetup vbsetup.cpp)
+target_compile_features(vbsetup PRIVATE cxx_std_17)
+target_compile_definitions(vbsetup PRIVATE UNICODE _UNICODE)
+target_link_libraries(vbsetup PRIVATE setupapi newdev cfgmgr32)
+if(MINGW)
+    target_link_options(vbsetup PRIVATE -municode)
+endif()
